@@ -121,19 +121,23 @@ def compute_priority_score(row, model):
     """
     Combines the model's predicted exploit probability with simple
     business-context weighting (exposure + data sensitivity).
-    This weighted-sum approach is intentionally simple for a prototype -
-    document this as a limitation/future-work item in your report.
+    Uses a weighted blend rather than a multiplier, so high-probability
+    CVEs don't all saturate at the same 1.0 ceiling and lose their
+    ranking order - this was a real bug found during testing.
     """
     features = row[FEATURE_COLS].astype(float).values.reshape(1, -1)
     exploit_prob = model.predict_proba(features)[0][1]
 
-    context_weight = 1.0
+    context_score = 0.0
     if row["internet_facing"]:
-        context_weight += 0.3
+        context_score += 0.5
     if row["sensitive_data"]:
-        context_weight += 0.3
+        context_score += 0.5
 
-    priority = min(exploit_prob * context_weight, 1.0)
+    # 70% weight on the model's real exploit probability, 30% on business
+    # context - this keeps CVEs ranked by actual predicted risk first,
+    # with context only nudging the order rather than flattening it.
+    priority = (0.7 * exploit_prob) + (0.3 * context_score)
     return exploit_prob, priority
 
 
@@ -156,8 +160,18 @@ if cve_df is None or model is None:
     st.stop()
 
 if real_scan_df is not None:
-    st.caption("Live scan of software installed on this machine")
-    matched_df = real_scan_df
+    data_source = st.radio(
+        "Data source",
+        ["Real laptop scan", "Sample organization (fictional)"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    if data_source == "Real laptop scan":
+        st.caption("Live scan of software installed on the developer's own laptop")
+        matched_df = real_scan_df
+    else:
+        st.caption("Explainable exploit-risk prioritization for a fictional sample organization")
+        matched_df = match_assets_to_cves(cve_df, SAMPLE_ASSETS)
 else:
     st.caption("Explainable exploit-risk prioritization for a sample organization "
                "(run scan_real_assets.py to use your own machine's real data instead)")
