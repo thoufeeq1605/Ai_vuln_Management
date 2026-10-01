@@ -1,14 +1,5 @@
-"""
-AI-Powered Vulnerability Management Dashboard
-----------------------------------------------
-Run with: streamlit run streamlit_app.py
-
-Requires processed_cves.csv and exploit_model.json to already exist -
-these are created by running vuln_management_prototype.py first.
-
-Install dependencies:
-    pip install streamlit pandas xgboost shap plotly --break-system-packages
-"""
+# Run with: streamlit run streamlit_app.py
+# Needs processed_cves.csv and exploit_model.json (from vuln_management_prototype.py)
 
 import json
 import pandas as pd
@@ -38,16 +29,10 @@ FEATURE_LABELS = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Data + model loading (cached so it only runs once per session)
-# ---------------------------------------------------------------------------
-
 @st.cache_data
 def load_cve_data():
     try:
         df = pd.read_csv("processed_cves.csv")
-        # CSV round-tripping can turn numeric columns into text (object dtype).
-        # Force them back to numeric so XGBoost/SHAP accept them.
         for col in FEATURE_COLS:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df[FEATURE_COLS] = df[FEATURE_COLS].fillna(0)
@@ -73,7 +58,6 @@ def get_explainer(_model):
 
 @st.cache_data
 def load_real_scan():
-    """Loads the real laptop scan if scan_real_assets.py has been run."""
     try:
         df = pd.read_csv("real_assets_scored.csv")
         for col in FEATURE_COLS:
@@ -85,11 +69,6 @@ def load_real_scan():
     except FileNotFoundError:
         return None
 
-
-# ---------------------------------------------------------------------------
-# Sample asset inventory - a fictional company's systems
-# Used as a fallback only if no real scan (real_assets_scored.csv) is found.
-# ---------------------------------------------------------------------------
 
 SAMPLE_ASSETS = pd.DataFrame([
     {"asset_name": "Payment API gateway", "vendor_keyword": "apache", "internet_facing": True, "sensitive_data": True},
@@ -103,11 +82,6 @@ SAMPLE_ASSETS = pd.DataFrame([
 
 
 def match_assets_to_cves(cve_df, assets_df):
-    """
-    Matches each asset to CVEs whose vendor field contains the asset's
-    vendor keyword. This is a simple substring match for the prototype -
-    a real system would match against precise product/version strings.
-    """
     matches = []
     for _, asset in assets_df.iterrows():
         keyword = asset["vendor_keyword"].lower()
@@ -118,13 +92,6 @@ def match_assets_to_cves(cve_df, assets_df):
 
 
 def compute_priority_score(row, model):
-    """
-    Combines the model's predicted exploit probability with simple
-    business-context weighting (exposure + data sensitivity).
-    Uses a weighted blend rather than a multiplier, so high-probability
-    CVEs don't all saturate at the same 1.0 ceiling and lose their
-    ranking order - this was a real bug found during testing.
-    """
     features = row[FEATURE_COLS].astype(float).values.reshape(1, -1)
     exploit_prob = model.predict_proba(features)[0][1]
 
@@ -134,16 +101,9 @@ def compute_priority_score(row, model):
     if row["sensitive_data"]:
         context_score += 0.5
 
-    # 70% weight on the model's real exploit probability, 30% on business
-    # context - this keeps CVEs ranked by actual predicted risk first,
-    # with context only nudging the order rather than flattening it.
     priority = (0.7 * exploit_prob) + (0.3 * context_score)
     return exploit_prob, priority
 
-
-# ---------------------------------------------------------------------------
-# UI
-# ---------------------------------------------------------------------------
 
 st.title("AI-powered vulnerability management dashboard")
 
@@ -185,7 +145,6 @@ if matched_df.empty:
     )
     st.stop()
 
-# Compute scores for every matched asset-CVE pair
 exploit_probs, priorities = [], []
 for _, row in matched_df.iterrows():
     prob, priority = compute_priority_score(row, model)
@@ -196,7 +155,6 @@ matched_df["exploit_probability"] = exploit_probs
 matched_df["priority_score"] = priorities
 matched_df = matched_df.sort_values("priority_score", ascending=False).reset_index(drop=True)
 
-# --- Summary metrics ---
 col1, col2, col3 = st.columns(3)
 col1.metric("Assets scanned", len(SAMPLE_ASSETS))
 col2.metric("CVEs matched", len(matched_df))
@@ -204,10 +162,7 @@ col3.metric("Critical priority (>0.7)", int((matched_df["priority_score"] > 0.7)
 
 st.divider()
 
-# --- Ranked table ---
 st.subheader("Ranked vulnerabilities")
-# The real scan has 'installed_version' instead of 'vendor' (the fictional
-# sample data source) - show whichever column is actually present.
 extra_col = "installed_version" if "installed_version" in matched_df.columns else "vendor"
 display_df = matched_df[["asset_name", "cve_id", extra_col, "base_score", "priority_score"]].copy()
 display_df["priority_score"] = display_df["priority_score"].round(2)
@@ -216,7 +171,6 @@ st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 st.divider()
 
-# --- SHAP explanation for a selected CVE ---
 st.subheader("Explain a vulnerability's risk score")
 selected_cve = st.selectbox("Select a CVE to see why it was scored this way", matched_df["cve_id"].unique())
 
@@ -226,25 +180,57 @@ features_df = pd.DataFrame([selected_row[FEATURE_COLS].astype(float)], columns=F
 explainer = get_explainer(model)
 shap_values = explainer.shap_values(features_df)[0]
 
-labels = [FEATURE_LABELS[f] for f in FEATURE_COLS]
-colors = ["#D85A30" if v > 0 else "#1D9E75" for v in shap_values]
+sorted_pairs = sorted(zip(FEATURE_COLS, shap_values), key=lambda pair: abs(pair[1]))
+sorted_features = [p[0] for p in sorted_pairs]
+sorted_values = [p[1] for p in sorted_pairs]
+sorted_labels = [FEATURE_LABELS[f] for f in sorted_features]
+
+risk_color = "#E4572E"
+safe_color = "#2E9E5B"
+colors = [risk_color if v > 0 else safe_color for v in sorted_values]
 
 fig = go.Figure(go.Bar(
-    x=shap_values,
-    y=labels,
+    x=sorted_values,
+    y=sorted_labels,
     orientation="h",
-    marker_color=colors,
+    marker=dict(color=colors, line=dict(width=0)),
+    text=[f"{v:+.2f}" for v in sorted_values],
+    textposition="outside",
+    textfont=dict(size=13),
 ))
+fig.add_vline(x=0, line_width=1.5, line_color="rgba(150,150,150,0.6)")
 fig.update_layout(
-    xaxis_title="Contribution to risk prediction",
-    height=350,
-    margin=dict(l=10, r=10, t=10, b=10),
+    title=dict(text="What drove this risk score", font=dict(size=16)),
+    xaxis_title="Contribution to predicted risk",
+    height=380,
+    margin=dict(l=10, r=40, t=50, b=40),
+    plot_bgcolor="rgba(0,0,0,0)",
+    paper_bgcolor="rgba(0,0,0,0)",
+    font=dict(size=13),
+    showlegend=False,
+    xaxis=dict(zeroline=False, gridcolor="rgba(150,150,150,0.15)"),
+    yaxis=dict(automargin=True),
 )
 st.plotly_chart(fig, use_container_width=True)
 
-st.caption(
-    f"{selected_row['asset_name']} runs software affected by {selected_cve} "
-    f"(CVSS base score: {selected_row['base_score']:.1f}). "
-    f"Predicted exploit probability: {selected_row['exploit_probability']:.0%}. "
-    f"Red bars increased the risk score, green bars decreased it."
+increasing = [(FEATURE_LABELS[f], v) for f, v in zip(sorted_features, sorted_values) if v > 0]
+decreasing = [(FEATURE_LABELS[f], v) for f, v in zip(sorted_features, sorted_values) if v < 0]
+increasing.sort(key=lambda p: -p[1])
+decreasing.sort(key=lambda p: p[1])
+top_increasing = [label for label, _ in increasing[:2]]
+top_decreasing = [label for label, _ in decreasing[:2]]
+
+summary_parts = []
+if top_increasing:
+    summary_parts.append(f"flagged as **higher risk** mainly because of: {', '.join(top_increasing).lower()}")
+if top_decreasing:
+    summary_parts.append(f"risk was **reduced** by: {', '.join(top_decreasing).lower()}")
+summary_text = " — ".join(summary_parts) if summary_parts else "no single factor stood out strongly."
+
+st.info(
+    f"**{selected_cve}** affecting **{selected_row['asset_name']}** was {summary_text}.\n\n"
+    f"CVSS base score: {selected_row['base_score']:.1f} · "
+    f"Predicted exploit probability: {selected_row['exploit_probability']:.0%} · "
+    f"Final priority score: {selected_row['priority_score']:.2f}"
 )
+st.caption("Orange bars pushed the risk score up, green bars pulled it down - longer bars mean stronger influence.")
